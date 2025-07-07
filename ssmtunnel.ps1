@@ -2,6 +2,94 @@ param (
     [string]$AWSProfile
 )
 
+# --- Port History and Scanning Functions ---
+$historyDir = "$env:USERPROFILE\.ssmtunnel"
+$historyFile = "$historyDir\porthistory.json"
+
+# Ensure the history directory exists
+if (-not (Test-Path $historyDir)) {
+    New-Item -Path $historyDir -ItemType Directory -Force | Out-Null
+}
+
+function Get-PortHistory {
+    if (-not (Test-Path $historyFile)) {
+        return @()
+    }
+    try {
+        return Get-Content $historyFile -Raw | ConvertFrom-Json
+    } catch {
+        Write-Warning "Could not read or parse port history file at $historyFile"
+        return @()
+    }
+}
+
+function Save-PortHistory {
+    param(
+        [int]$LocalPort,
+        [string]$InstanceId,
+        [string]$ProfileName
+    )
+    $history = Get-PortHistory
+    $now = Get-Date -Format 'u'
+    
+    # Remove existing entry for this port, if any
+    $history = $history | Where-Object { $_.LocalPort -ne $LocalPort }
+    
+    # Add new entry to the top
+    $newEntry = @{
+        LocalPort   = $LocalPort
+        InstanceId  = $InstanceId
+        ProfileName = $ProfileName
+        LastUsed    = $now
+    }
+    $history = @($newEntry) + $history
+    
+    # Keep only the last 10 entries
+    if ($history.Count -gt 10) {
+        $history = $history[0..9]
+    }
+    
+    $history | ConvertTo-Json | Set-Content -Path $historyFile -Encoding UTF8
+}
+
+function Get-ActiveTcpPorts {
+    # Get all active TCP listeners
+    $tcpConnections = Get-NetTCPConnection -State Listen -ErrorAction SilentlyContinue
+    if ($tcpConnections) {
+        return $tcpConnections.LocalPort
+    }
+    return @()
+}
+
+function Show-UnavailablePorts {
+    param(
+        [int]$StartPort = 8999,
+        [int]$EndPort = 9050
+    )
+    Write-Host "`n--- Used Ports ($StartPort - $EndPort) ---"
+    $activePorts = Get-ActiveTcpPorts
+    $history = Get-PortHistory
+    $found = $false
+
+    for ($port = $StartPort; $port -le $EndPort; $port++) {
+        if ($activePorts -contains $port) {
+            $historyEntry = $history | Where-Object { $_.LocalPort -eq $port } | Select-Object -First 1
+            if ($historyEntry) {
+                Write-Host ("  Port {0}: In Use - Last used for {1} with profile {2}" -f $port, $historyEntry.InstanceId, $historyEntry.ProfileName) -ForegroundColor Red
+            } else {
+                Write-Host ("  Port {0}: In Use - (No history available)" -f $port) -ForegroundColor Red
+            }
+            $found = $true
+        }
+    }
+
+    if (-not $found) {
+        Write-Host "  No used ports found in the range $StartPort - $EndPort." -ForegroundColor Cyan
+    }
+    Write-Host "------------------------`n"
+}
+
+# --- AWS Profile Functions ---
 function Get-AwsProfiles {
     $configFile = "$env:USERPROFILE\.aws\config"
     if (-not (Test-Path $configFile)) {
@@ -214,39 +302,86 @@ if (-not $AWSProfile) {
 
 # Ensure AWS CLI is available
 if (-not (Get-Command "aws" -ErrorAction SilentlyContinue)) {
-    Write-Host "AWS CLI is not installed. Downloading and installing AWS CLI v2..."
+    Write-Host "AWS CLI is not installed or not in your PATH."
 
+    # Check for Admin rights, which are required for MSI installation
+    if (-not ([System.Security.Principal.WindowsPrincipal][System.Security.Principal.WindowsIdentity]::GetCurrent()).IsInRole([System.Security.Principal.WindowsBuiltInRole]::Administrator)) {
+        Write-Host "[ERROR] Administrator privileges are required to install the AWS CLI." -ForegroundColor Red
+        Write-Host "Please re-run this script from a terminal with Administrator rights."
+        exit
+    }
+
+    # Check PowerShell Version
+    if ($PSVersionTable.PSVersion.Major -lt 5) {
+        Write-Host "[WARNING] Your PowerShell version is $($PSVersionTable.PSVersion). Version 5.1 or higher is recommended."
+        Write-Host "The script will attempt to continue, but may fail."
+    }
+
+    $confirmation = Read-Host "Do you want to proceed with downloading and installing AWS CLI v2? (y/n)"
+    if ($confirmation -ne 'y') {
+        Write-Host "Installation cancelled by user."
+        exit
+    }
+
+    Write-Host "Downloading and installing AWS CLI v2..."
     $installerUrl = "https://awscli.amazonaws.com/AWSCLIV2.msi"
     $installerPath = "$env:TEMP\AWSCLIV2.msi"
 
     # Download the installer
     try {
-        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing
+        Write-Host "Downloading from $installerUrl..."
+        Invoke-WebRequest -Uri $installerUrl -OutFile $installerPath -UseBasicParsing -ErrorAction Stop
     } catch {
-        Write-Host "Failed to download AWS CLI installer. Please check your internet connection."
+        Write-Host "[ERROR] Failed to download the AWS CLI installer." -ForegroundColor Red
+        Write-Host "  - Check your internet connection."
+        Write-Host "  - Ensure PowerShell can access the internet (check firewalls)."
+        Write-Host "  - Error details: $($_.Exception.Message)"
         exit
     }
 
     # Install AWS CLI
     try {
-        Start-Process msiexec.exe -Wait -ArgumentList "/i `"$installerPath`" /qn"
+        Write-Host "Installing AWS CLI... This may take a few moments."
+        # Using /passive for some UI but no user interaction, /qn is fully quiet
+        $msiArgs = "/i `"$installerPath`" /passive /norestart"
+        $process = Start-Process msiexec.exe -Wait -ArgumentList $msiArgs -PassThru
+        if ($process.ExitCode -ne 0) {
+            # Throw a custom error to be caught by the catch block
+            throw "MSI installer exited with code $($process.ExitCode). A common reason is needing to run as Administrator."
+        }
     } catch {
-        Write-Host "Failed to install AWS CLI. Please run this script as Administrator."
+        Write-Host "[ERROR] Failed to install the AWS CLI." -ForegroundColor Red
+        Write-Host "  - Ensure you are running this script with Administrator privileges."
+        Write-Host "  - The installer may have failed. You can try running it manually from '$installerPath'."
+        Write-Host "  - Error details: $($_.Exception.Message)"
+        # Don't exit here, let the user decide if they want to keep the installer
+        Read-Host "Press Enter to exit."
         exit
+    } finally {
+        # Clean up the installer if it still exists
+        if (Test-Path $installerPath) {
+            Write-Host "Removing installer..."
+            Remove-Item $installerPath -Force -ErrorAction SilentlyContinue
+        }
     }
 
-    # Remove installer
-    Remove-Item $installerPath -Force
-
-    # Refresh environment variables
-    $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+    # Refresh environment variables and add to current session
+    Write-Host "Installation complete. Refreshing PATH..."
+    $env:Path = [System.Environment]::GetEnvironmentVariable("Path", "Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path", "User")
+    
+    # Also explicitly add the default install path to the current session's PATH for good measure
+    $awsCliPath = "$env:ProgramFiles\Amazon\AWSCLIV2"
+    if (Test-Path $awsCliPath -and $env:Path -notlike "*$awsCliPath*") {
+        $env:Path += ";$awsCliPath"
+    }
 
     # Check again
     if (-not (Get-Command "aws" -ErrorAction SilentlyContinue)) {
-        Write-Host "AWS CLI installation failed or is not in PATH. Please restart your terminal or install manually."
+        Write-Host "[ERROR] AWS CLI was installed, but the 'aws' command is still not available." -ForegroundColor Red
+        Write-Host "Please restart your terminal and try again. If the problem persists, a system restart may be required."
         exit
     } else {
-        Write-Host "AWS CLI v2 installed successfully."
+        Write-Host "AWS CLI v2 installed and configured successfully." -ForegroundColor Green
     }
 }
 
@@ -312,19 +447,61 @@ if (-not $selectedInstance) {
     exit
 }
 
-# Prompt for local port number
+# --- Port Selection with History ---
 $localPort = ""
 while ($true) {
-    $localPort = Read-Host "Enter the local port number to forward to (e.g., 56789). This is required"
-    if ($localPort -match "^\d+$") {
-        $portNum = [int]$localPort
+    Show-UnavailablePorts
+    Write-Host "`n--- Select a Local Port ---"
+    $history = Get-PortHistory
+    $activePorts = Get-ActiveTcpPorts
+    $historyOptions = @{}
+    $optionIndex = 1
+
+    if ($history.Count -gt 0) {
+        Write-Host "Recent Ports:"
+        foreach ($entry in $history) {
+            $status = if ($activePorts -contains $entry.LocalPort) { 
+                [PSCustomObject]@{ Text = "In Use"; Color = "Red" }
+            } else {
+                [PSCustomObject]@{ Text = "Available"; Color = "Green" }
+            }
+            
+            Write-Host ("  {0,2}. Port: {1,-5} ({2}) - Last used for {3} with profile {4}" -f $optionIndex, $entry.LocalPort, $status.Text, $entry.InstanceId, $entry.ProfileName) -ForegroundColor $status.Color
+            
+            $historyOptions[$optionIndex] = $entry.LocalPort
+            $optionIndex++
+        }
+    }
+
+    $selection = Read-Host "Select a recent port by number, or enter a new port number"
+
+    if ($selection -match "^\d+$") {
+        $portNum = [int]$selection
+        
+        if ($historyOptions.ContainsKey($portNum)) {
+            # User selected a port from history
+            $selectedPort = $historyOptions[$portNum]
+            if ($activePorts -contains $selectedPort) {
+                Write-Warning "Port $selectedPort is currently in use. Please choose another."
+                continue
+            }
+            $localPort = $selectedPort
+            break
+        }
+        
+        # User entered a new port number
         if ($portNum -gt 0 -and $portNum -le 65535) {
-            break # Valid port entered
+            if ($activePorts -contains $portNum) {
+                Write-Warning "Port $portNum is currently in use. Please choose another."
+                continue
+            }
+            $localPort = $portNum
+            break
         } else {
             Write-Warning "Port number must be between 1 and 65535."
         }
     } else {
-        Write-Warning "Invalid input. Please enter a numeric port number."
+        Write-Warning "Invalid input. Please enter a numeric port number or select from the list."
     }
 }
 
@@ -345,8 +522,11 @@ Write-Host "`nStarting SSM tunnel in background..."
 $jobName = "SSMTunnel_$(Get-Date -Format 'HHmmss')"
 $job = Start-Job -ScriptBlock {
     param($command)
-    Invoke-Expression $command
+    # Using Start-Process to avoid Invoke-Expression and to get a process ID
+    $process = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$command`"" -NoNewWindow -PassThru
+    $process.WaitForExit()
 } -ArgumentList $command -Name $jobName
+
 
 # Wait a moment for tunnel to establish
 Write-Host "Waiting for tunnel to establish..."
@@ -356,6 +536,9 @@ Start-Sleep -Seconds 3
 if ($job.State -eq "Running") {
     Write-Host "SSM tunnel is running in background." -ForegroundColor Green
     
+    # Save the successful port to history
+    Save-PortHistory -LocalPort $localPort -InstanceId $selectedInstance.InstanceId -ProfileName $AWSProfile
+
     # Launch RDP automatically
     if ($remotePort -eq 3389) {
         Write-Host "Launching RDP session to localhost:$localPort..."
@@ -441,7 +624,7 @@ if ($job.State -eq "Running") {
                     Write-Host "  State: $($job.State)"
                     Write-Host "  Local Port: $localPort"
                     Write-Host "  Remote Port: $remotePort"
-                    Write-Host "  Instance: $($selectedInstance.InstanceId)"
+                    Write-Host "  Instance: $($selectedInstance.InstanceId) ($($selectedInstance.Name))"
                     Write-Host "  Profile: $AWSProfile"
                 }
             }
