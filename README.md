@@ -4,6 +4,8 @@
 
 `ssmtunnel.ps1` is a comprehensive PowerShell script that provides an interactive AWS SSM port forwarding tunnel helper for Windows environments. The script establishes secure tunnels to EC2 instances using AWS Systems Manager (SSM) and automatically launches RDP or provides SSH connection instructions. It features advanced tunnel management, port history tracking, and instance name caching for an enhanced user experience.
 
+If you ALREADY have AWS Profiles setup - just run ./ssmtunnel.ps1 - you can choose from there.
+
 ## Features
 
 ### Core Functionality
