@@ -1,10 +1,155 @@
+# AWS SSM Tunnel Helper Script
+# Author: Michael Brown - mb@resolvetech.com
+# I used robots to write this script to help with secure multi account access in AWS.
+# License: MIT License
+
 param (
     [string]$AWSProfile
 )
 
+# Script version
+$ScriptVersion = "2.0"
+
+# Default AWS region for instance lookups (set to your preferred region)
+$DefaultAwsRegion = "us-east-1"
+
+# Display version information
+Write-Host "SSM Tunnel Script v$ScriptVersion" -ForegroundColor Cyan
+Write-Host "================================`n"
+
 # --- Port History and Scanning Functions ---
 $historyDir = "$env:USERPROFILE\.ssmtunnel"
 $historyFile = "$historyDir\porthistory.json"
+
+# Function to get active local SSM tunnels
+function Get-ActiveLocalTunnels {
+    # Get all PowerShell jobs that are SSM tunnel jobs
+    $ssmJobs = Get-Job -Name "SSMTunnel*" -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Running" }
+    
+    # Get active TCP connections on common SSM tunnel ports
+    $activePorts = Get-ActiveTcpPorts
+    $tunnelPorts = $activePorts | Where-Object { $_ -ge 8999 -and $_ -le 9050 }
+    
+    # Get port history to match ports with instance info
+    $history = Get-PortHistory
+    
+    $localTunnels = @()
+    
+    foreach ($port in $tunnelPorts) {
+        $historyEntry = $history | Where-Object { $_.LocalPort -eq $port } | Select-Object -First 1
+        
+        $tunnelInfo = [PSCustomObject]@{
+            LocalPort = $port
+            InstanceId = if ($historyEntry) { $historyEntry.InstanceId } else { "Unknown" }
+            ProfileName = if ($historyEntry) { $historyEntry.ProfileName } else { "Unknown" }
+            LastUsed = if ($historyEntry) { $historyEntry.LastUsed } else { "Unknown" }
+            HasActiveJob = $false
+            JobName = $null
+            InstanceName = "Unknown"
+        }
+        
+        # Check if there's an active job for this port
+        foreach ($job in $ssmJobs) {
+            if ($job.Name -like "*$port*" -or $job.Name -like "*SSMTunnel*") {
+                $tunnelInfo.HasActiveJob = $true
+                $tunnelInfo.JobName = $job.Name
+                break
+            }
+        }
+        
+        $localTunnels += $tunnelInfo
+    }
+    
+    return $localTunnels
+}
+
+function Get-InstanceName {
+    param(
+        [string]$InstanceId,
+        [string]$ProfileName
+    )
+    
+    if ($InstanceId -eq "Unknown") {
+        return "Unknown"
+    }
+    
+    try {
+        # Use JSON output for more reliable parsing
+        $awsOutput = aws ec2 describe-instances --instance-ids $InstanceId --profile $ProfileName --region $DefaultAwsRegion --output json 2>&1
+        if ($LASTEXITCODE -ne 0) {
+            return "(Error: AWS CLI failed)"
+        }
+        
+        $data = $awsOutput | ConvertFrom-Json
+        $instance = $data.Reservations[0].Instances[0]
+        $nameTag = $instance.Tags | Where-Object { $_.Key -eq "Name" } | Select-Object -First 1
+        
+        if ($nameTag -and $nameTag.Value) {
+            return $nameTag.Value.Trim()
+        } else {
+            return "(No Name)"
+        }
+    } catch {
+        return "(Error getting name: $($_.Exception.Message))"
+    }
+}
+
+function Show-ActiveLocalTunnels {
+    Write-Host "`n--- Active Local SSM Tunnels ---" -ForegroundColor Yellow
+    
+    $tunnels = Get-ActiveLocalTunnels
+    
+    if ($tunnels.Count -eq 0) {
+        Write-Host "  No active local SSM tunnels found." -ForegroundColor Gray
+        Write-Host "  (No ports in range 8999-9050 are currently in use)" -ForegroundColor Gray
+    } else {
+        Write-Host "  Found $($tunnels.Count) active tunnel(s):" -ForegroundColor Green
+        Write-Host ""
+        
+        foreach ($tunnel in $tunnels) {
+            $statusColor = if ($tunnel.HasActiveJob) { "Green" } else { "Yellow" }
+            $statusText = if ($tunnel.HasActiveJob) { "ACTIVE" } else { "PORT IN USE" }
+            
+            # Get instance name if we have a valid instance ID and profile
+            $instanceName = if ($tunnel.InstanceId -ne "Unknown" -and $InstanceNameMap.ContainsKey($tunnel.InstanceId)) {
+                $InstanceNameMap[$tunnel.InstanceId]
+            } elseif ($tunnel.InstanceId -ne "Unknown" -and $tunnel.ProfileName -ne "Unknown") {
+                # Fallback to live AWS query if not in cache
+                $liveName = Get-InstanceName -InstanceId $tunnel.InstanceId -ProfileName $tunnel.ProfileName
+                if ($liveName -and $liveName -ne "Unknown" -and $liveName -notmatch "Error") {
+                    # Cache the result for future use
+                    $global:InstanceNameMap[$tunnel.InstanceId] = $liveName
+                    $liveName
+                } else {
+                    "Unknown"
+                }
+            } else {
+                "Unknown"
+            }
+            
+            Write-Host ("  Port {0}: {1}" -f $tunnel.LocalPort, $statusText) -ForegroundColor $statusColor
+            Write-Host ("    Instance: {0} ({1})" -f $tunnel.InstanceId, $instanceName) -ForegroundColor White
+            Write-Host ("    Profile: {0}" -f $tunnel.ProfileName) -ForegroundColor White
+            Write-Host ("    Last Used: {0}" -f $tunnel.LastUsed) -ForegroundColor White
+            if ($tunnel.HasActiveJob) {
+                Write-Host ("    Job: {0}" -f $tunnel.JobName) -ForegroundColor Cyan
+            }
+            Write-Host ""
+        }
+    }
+    
+    # Also show any running SSM tunnel jobs
+    $ssmJobs = Get-Job -Name "SSMTunnel*" -ErrorAction SilentlyContinue | Where-Object { $_.State -eq "Running" }
+    if ($ssmJobs.Count -gt 0) {
+        Write-Host "  Running SSM Tunnel Jobs:" -ForegroundColor Cyan
+        foreach ($job in $ssmJobs) {
+            Write-Host ("    {0} (ID: {1}) - {2}" -f $job.Name, $job.Id, $job.State) -ForegroundColor White
+        }
+        Write-Host ""
+    }
+    
+    Write-Host "------------------------`n"
+}
 
 # Ensure the history directory exists
 if (-not (Test-Path $historyDir)) {
@@ -223,6 +368,82 @@ function Rename-AwsProfile {
     Write-Host "Profile '$OldName' renamed to '$NewName' in config and credentials."
 }
 
+# Instance name cache file
+$InstanceNameCacheFile = "$env:USERPROFILE\.ssmtunnel\instance_names.json"
+$InstanceNameMap = @{}
+
+function Load-InstanceNameCache {
+    if (Test-Path $InstanceNameCacheFile) {
+        try {
+            $jsonData = Get-Content $InstanceNameCacheFile -Raw | ConvertFrom-Json
+            # Convert PSObject to hashtable for proper indexing
+            $global:InstanceNameMap = @{}
+            $jsonData.PSObject.Properties | ForEach-Object {
+                $global:InstanceNameMap[$_.Name] = $_.Value
+            }
+            Write-Host "Loaded instance name cache from file." -ForegroundColor Cyan
+        } catch {
+            Write-Warning "Failed to load instance name cache. Will refresh from AWS."
+            $global:InstanceNameMap = @{}
+        }
+    } else {
+        $global:InstanceNameMap = @{}
+    }
+}
+
+function Save-InstanceNameCache {
+    try {
+        $InstanceNameMap | ConvertTo-Json | Set-Content -Path $InstanceNameCacheFile -Encoding UTF8
+        Write-Host "Saved instance name cache to file." -ForegroundColor Cyan
+    } catch {
+        Write-Warning "Failed to save instance name cache to file."
+    }
+}
+
+function Refresh-InstanceNameCache {
+    # Prompt user to select a profile for the refresh
+    $profiles = Get-AwsProfiles
+    if ($profiles.Count -eq 0) {
+        Write-Host "No AWS profiles found. Cannot refresh instance name cache." -ForegroundColor Red
+        return
+    }
+    Write-Host "\nSelect a profile to use for refreshing the instance name cache:"
+    for ($i = 0; $i -lt $profiles.Count; $i++) {
+        Write-Host ("  {0}. {1}" -f ($i+1), $profiles[$i])
+    }
+    $profileSelection = Read-Host "Enter the number of the profile to use"
+    if ($profileSelection -match "^\d+$" -and [int]$profileSelection -ge 1 -and [int]$profileSelection -le $profiles.Count) {
+        $selectedProfile = $profiles[[int]$profileSelection-1]
+    } else {
+        Write-Host "Invalid selection. Aborting refresh." -ForegroundColor Red
+        return
+    }
+    Write-Host "Refreshing instance name cache from AWS using profile '$selectedProfile'..." -ForegroundColor Yellow
+    $newMap = @{}
+    try {
+        $awsOutput = aws ec2 describe-instances --profile $selectedProfile --region $DefaultAwsRegion --output json 2>&1
+        $data = $awsOutput | ConvertFrom-Json
+        Write-Host "Reservations found: $($data.Reservations.Count)"
+        foreach ($reservation in $data.Reservations) {
+            Write-Host "Instances in reservation: $($reservation.Instances.Count)"
+            foreach ($instance in $reservation.Instances) {
+                $id = $instance.InstanceId
+                $nameTag = $instance.Tags | Where-Object { $_.Key -eq "Name" } | Select-Object -First 1
+                $name = if ($nameTag) { $nameTag.Value } else { "(No Name)" }
+                $newMap[$id] = $name
+            }
+        }
+        $global:InstanceNameMap = $newMap
+        Save-InstanceNameCache
+        Write-Host "Instance name cache refreshed from AWS using profile '$selectedProfile'." -ForegroundColor Green
+    } catch {
+        Write-Warning "Failed to refresh instance name cache from AWS: $($_.Exception.Message)"
+    }
+}
+
+# Load instance name cache at startup
+Load-InstanceNameCache
+
 if (-not $AWSProfile) {
     while ($true) {
         $availableProfiles = Show-ProfileList
@@ -235,9 +456,13 @@ if (-not $AWSProfile) {
         $newProfileOptionNumber = $availableProfiles.Count + 1
         $deleteProfileOptionNumber = $availableProfiles.Count + 2
         $renameProfileOptionNumber = $availableProfiles.Count + 3
+        $listSessionsOptionNumber = $availableProfiles.Count + 4
+        $refreshCacheOptionNumber = $availableProfiles.Count + 5
         Write-Host "  $newProfileOptionNumber. Configure a new SSO profile"
         Write-Host "  $deleteProfileOptionNumber. Delete a profile"
         Write-Host "  $renameProfileOptionNumber. Rename a profile"
+        Write-Host "  $listSessionsOptionNumber. List active local SSM tunnels"
+        Write-Host "  $refreshCacheOptionNumber. Refresh instance name cache from AWS"
         
         $selection = Read-Host "Select a profile number, enter a profile name, or choose an action"
         if ($selection -match "^\d+$") {
@@ -276,6 +501,13 @@ if (-not $AWSProfile) {
                 } else {
                     Write-Host "Invalid profile number."
                 }
+                continue # Reload menu
+            } elseif ($selectedIndex -eq ($listSessionsOptionNumber - 1)) {
+                # List active local tunnels
+                Show-ActiveLocalTunnels
+                continue # Reload menu
+            } elseif ($selectedIndex -eq ($refreshCacheOptionNumber - 1)) {
+                Refresh-InstanceNameCache
                 continue # Reload menu
             } else {
                 Write-Host "Invalid selection."
@@ -511,20 +743,23 @@ $remotePort = if ($portSelection -eq "22") { 22 } else { 3389 }
 
 # Build and execute the AWS SSM command
 Write-Host "Starting port forwarding session to instance $($selectedInstance.InstanceId)..."
-$jsonParams = "{`"portNumber`":[`"$remotePort`"],`"localPortNumber`":[`"$localPort`"]}"
+$jsonParams = @{
+    "portNumber" = @("$remotePort")
+    "localPortNumber" = @("$localPort")
+} | ConvertTo-Json -Compress
 $command = "aws ssm start-session --target $($selectedInstance.InstanceId) --document-name AWS-StartPortForwardingSession --parameters '$jsonParams' --profile $AWSProfile"
 
 Write-Host "`nCommand to start session (for reference):"
 Write-Host "$command"
+Write-Host "JSON Parameters: $jsonParams"
 
 # Start SSM tunnel in background job
 Write-Host "`nStarting SSM tunnel in background..."
 $jobName = "SSMTunnel_$(Get-Date -Format 'HHmmss')"
 $job = Start-Job -ScriptBlock {
     param($command)
-    # Using Start-Process to avoid Invoke-Expression and to get a process ID
-    $process = Start-Process powershell.exe -ArgumentList "-NoProfile -ExecutionPolicy Bypass -Command `"$command`"" -NoNewWindow -PassThru
-    $process.WaitForExit()
+    # Execute the AWS command directly
+    Invoke-Expression $command
 } -ArgumentList $command -Name $jobName
 
 
@@ -596,6 +831,7 @@ if ($job.State -eq "Running") {
     Write-Host "  Press 's' to stop tunnel gracefully"
     Write-Host "  Press 'f' to force stop tunnel"
     Write-Host "  Press 'i' to show tunnel info"
+    Write-Host "  Press 'l' to list active local SSM tunnels"
     
     do {
         if ($Host.UI.RawUI.KeyAvailable) {
@@ -627,6 +863,9 @@ if ($job.State -eq "Running") {
                     Write-Host "  Instance: $($selectedInstance.InstanceId) ($($selectedInstance.Name))"
                     Write-Host "  Profile: $AWSProfile"
                 }
+                'l' {
+                    Show-ActiveLocalTunnels
+                }
             }
         }
         
@@ -646,6 +885,16 @@ if ($job.State -eq "Running") {
     if ($job.HasMoreData) {
         Write-Host "Job output:"
         Receive-Job $job
+    }
+    
+    # Check for any error output
+    if ($job.ChildJobs) {
+        foreach ($childJob in $job.ChildJobs) {
+            if ($childJob.HasMoreData) {
+                Write-Host "Child job output:"
+                Receive-Job $childJob
+            }
+        }
     }
     
     # Clean up failed job

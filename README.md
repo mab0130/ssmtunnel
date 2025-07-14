@@ -2,80 +2,196 @@
 
 ## Overview
 
-`ssmtunnel.ps1` is a PowerShell script that helps you quickly establish a secure port forwarding tunnel to an AWS EC2 instance using AWS Systems Manager (SSM). It provides an interactive menu to select your AWS profile and EC2 instance, then launches an SSM port forwarding session in the background. For RDP-enabled instances, it automatically launches Remote Desktop (mstsc.exe) to connect to the forwarded port.
+`ssmtunnel.ps1` is a comprehensive PowerShell script that provides an interactive AWS SSM port forwarding tunnel helper for Windows environments. The script establishes secure tunnels to EC2 instances using AWS Systems Manager (SSM) and automatically launches RDP or provides SSH connection instructions. It features advanced tunnel management, port history tracking, and instance name caching for an enhanced user experience.
 
 ## Features
-- Interactive AWS profile and EC2 instance selection
-- Supports SSO and non-SSO AWS profiles
-- Automatically launches RDP (mstsc.exe) for Windows instances
-- SSH tunnel instructions for Linux instances
-- Runs the SSM tunnel in a background job (non-blocking)
-- Interactive controls to stop or inspect the tunnel
-- Handles AWS CLI installation if missing
+
+### Core Functionality
+- **Interactive Profile Selection**: Multi-level menu system with SSO support and profile management
+- **Instance Selection**: Out-GridView interface for EC2 instance selection with real-time AWS API queries
+- **Smart Port Management**: Port history tracking, availability scanning, and conflict detection
+- **Background Job Management**: Non-blocking PowerShell jobs for tunnel execution
+- **Automatic Client Launch**: RDP (mstsc.exe) auto-launch for Windows instances
+- **SSH Instructions**: Detailed SSH connection guidance for Linux instances
+
+### Advanced Features
+- **Active Tunnel Detection**: Scans ports 8999-9050 to identify active SSM tunnels
+- **Port History**: JSON-based tracking of recently used ports with instance correlation
+- **Instance Name Caching**: Reduces AWS API calls by caching instance names locally
+- **Profile Management**: Create, delete, and rename AWS profiles directly from the script
+- **Real-time Monitoring**: Interactive controls for tunnel status and management
+- **Comprehensive Error Handling**: AWS credential expiration detection and recovery guidance
+
+### Interactive Controls
+While tunnels are active, use these keyboard shortcuts:
+- `q` - Quit and stop tunnel
+- `s` - Stop tunnel gracefully
+- `f` - Force stop tunnel
+- `i` - Show detailed tunnel information
+- `l` - List all active local SSM tunnels
 
 ## Prerequisites
-- **Windows 10/11**
-- **PowerShell 7+** (recommended)
-- **AWS CLI v2** (the script will attempt to install if missing)
-- AWS credentials and profiles configured (`~/.aws/config` and `~/.aws/credentials`)
-- SSM agent must be enabled on the target EC2 instance
-- The instance must have the necessary IAM permissions for SSM
 
-## Setup
-1. Download or copy `ssmtunnel.ps1` to your local machine.
-2. Open a PowerShell terminal as your user (not as Administrator unless needed for AWS CLI install).
-3. Ensure your AWS profiles are configured (run `aws configure` or `aws configure sso` as needed).
+- **Windows 10/11**
+- **PowerShell 7+** (recommended for optimal performance)
+- **AWS CLI v2** (auto-installed if missing with Administrator privileges)
+- AWS credentials and profiles configured (`~/.aws/config` and `~/.aws/credentials`)
+- SSM-enabled EC2 instances with proper IAM permissions
+- Network connectivity to AWS services
+
+## Installation & Setup
+
+1. Download `ssmtunnel.ps1` to your preferred directory
+2. Open PowerShell 7+ (as user, not Administrator unless installing AWS CLI)
+3. Configure AWS profiles:
+   ```powershell
+   aws configure sso  # For SSO profiles
+   aws configure      # For standard profiles
+   ```
+4. Ensure EC2 instances have SSM agent enabled and proper IAM roles
 
 ## Usage
-Run the script from PowerShell:
 
+### Basic Usage
 ```powershell
-# In the directory containing ssmtunnel.ps1
+# Run the script interactively
 ./ssmtunnel.ps1
+
+# Run with specific profile
+./ssmtunnel.ps1 -AWSProfile "your-profile-name"
 ```
 
-### Steps:
-1. **Profile Selection:**
-   - The script lists available AWS profiles. Select by number or name.
-   - You can also configure, delete, or rename profiles from the menu.
-2. **SSO Login (if needed):**
-   - The script will prompt to perform SSO login if required.
-3. **Instance Selection:**
-   - The script fetches running EC2 instances and displays them in a selection window.
-4. **Port Selection:**
-   - Enter the local port to forward (e.g., 9000).
-   - Choose the remote port (22 for SSH, 3389 for RDP; default is 3389).
-5. **Tunnel Establishment:**
-   - The SSM tunnel starts in the background.
-   - For RDP, mstsc.exe is launched automatically to connect to the forwarded port.
-6. **Interactive Tunnel Control:**
-   - While the tunnel is active, you can:
-     - Press `q` to quit and stop the tunnel
-     - Press `s` to stop the tunnel gracefully
-     - Press `f` to force stop the tunnel
-     - Press `i` to show tunnel info
+### Workflow Steps
+1. **Profile Selection**: Choose from organized SSO groups and non-SSO profiles
+2. **SSO Authentication**: Optional SSO login prompt for SSO-enabled profiles
+3. **Instance Selection**: GridView selection of running EC2 instances with metadata
+4. **Port Configuration**: 
+   - Select from port history or enter new port
+   - Choose remote port (22 for SSH, 3389 for RDP)
+5. **Tunnel Management**: Background job execution with real-time monitoring
 
-## Example
+### Profile Management
+From the main menu, you can:
+- Configure new SSO profiles
+- Delete existing profiles
+- Rename profiles
+- List active tunnels
+- Refresh instance name cache
+
+## Data Management
+
+### Port History
+- **Location**: `~\.ssmtunnel\porthistory.json`
+- **Features**: Tracks last 10 used ports with instance and profile correlation
+- **Status**: Real-time availability checking with color-coded display
+
+### Instance Name Cache
+- **Location**: `~\.ssmtunnel\instance_names.json`
+- **Purpose**: Reduces AWS API calls by caching instance names locally
+- **Management**: Manual refresh option available from main menu
+
+## Technical Details
+
+### Key Functions
+- `Get-ActiveLocalTunnels()`: Detects active SSM tunnels on ports 8999-9050
+- `Show-ActiveLocalTunnels()`: Displays comprehensive tunnel status with job correlation
+- `Get-PortHistory()` / `Save-PortHistory()`: Manages persistent port usage history
+- `Get-AwsProfiles()` / `Get-ProfileGroups()`: Parses AWS configuration for profile management
+- `Stop-SsmTunnel()`: Graceful tunnel cleanup with force option
+
+### Port Management
+- **Default Range**: 8999-9050 for tunnel detection
+- **Conflict Detection**: Real-time port availability scanning
+- **History Integration**: Port reuse with instance correlation
+- **Status Indicators**: Color-coded availability display
+
+### Error Handling
+- AWS credential expiration detection
+- SSO token refresh guidance
+- Network connectivity validation
+- Port conflict resolution
+- PowerShell job lifecycle management
+
+## Command Examples
+
+### Development & Testing
+```powershell
+# Test with specific profile
+./ssmtunnel.ps1 -AWSProfile "prod-profile"
+
+# Check AWS CLI integration
+aws --version
+aws configure list-profiles
+
+# Monitor background jobs
+Get-Job -Name "SSMTunnel*"
+
+# Check active ports
+Get-NetTCPConnection -State Listen | Where-Object { $_.LocalPort -ge 8999 -and $_.LocalPort -le 9050 }
 ```
-./ssmtunnel.ps1
+
+### Debugging
+```powershell
+# Verify PowerShell version
+$PSVersionTable.PSVersion
+
+# View port history
+Get-Content "$env:USERPROFILE\.ssmtunnel\porthistory.json" | ConvertFrom-Json
+
+# Check instance name cache
+Get-Content "$env:USERPROFILE\.ssmtunnel\instance_names.json" | ConvertFrom-Json
 ```
-- Select your AWS profile (e.g., `prod`)
-- Select the EC2 instance
-- Enter local port (e.g., `9000`)
-- Accept default remote port (3389 for RDP)
-- RDP will launch and connect to `localhost:9000`
+
+## Configuration
+
+### Default Settings
+- **AWS Region**: `us-east-1` (configurable in script)
+- **Script Version**: `2.0`
+- **Port Range**: 8999-9050
+- **History Limit**: 10 entries
+- **Data Directory**: `~\.ssmtunnel`
+
+### AWS Profile Support
+- **SSO Profiles**: Full support with automatic grouping by SSO URL
+- **Standard Profiles**: Traditional AWS credential profiles
+- **Multi-Region**: Configurable default region support
 
 ## Troubleshooting
-- **AWS CLI not found:** The script will attempt to install AWS CLI v2 if missing.
-- **No profiles found:** Run `aws configure` or `aws configure sso` to set up profiles.
-- **No running instances:** Ensure your EC2 instance is running and has SSM enabled.
-- **Tunnel not working:** Check your AWS permissions, SSM agent status, and network connectivity.
-- **Script errors:** Ensure you are running PowerShell 7+ and have the necessary permissions.
 
-## Notes
-- The script does not require Administrator privileges unless installing AWS CLI.
-- The tunnel must remain open for the RDP/SSH session to work. Closing the script or stopping the tunnel will disconnect your session.
-- For SSH, use the provided instructions to connect via your forwarded port.
+### Common Issues
+- **AWS CLI Missing**: Script auto-installs with Administrator privileges
+- **Profile Not Found**: Use profile management menu to configure
+- **No Running Instances**: Verify instance state and SSM agent status
+- **Tunnel Failures**: Check AWS permissions and network connectivity
+- **Port Conflicts**: Use port history to identify available ports
+
+### Advanced Troubleshooting
+- **Credential Expiration**: Automatic detection with SSO login guidance
+- **Job Management**: Built-in cleanup for orphaned PowerShell jobs
+- **Cache Issues**: Manual instance name cache refresh option
+- **Performance**: Instance name caching reduces API call overhead
+
+## Security Considerations
+
+- **Local Data**: Port history and instance cache stored locally
+- **Credential Management**: Leverages AWS CLI credential chain
+- **Network Security**: Uses AWS SSM secure tunneling
+- **Access Control**: Respects AWS IAM permissions
+
+## Version History
+
+- **v2.0**: Current version with enhanced features
+  - Active tunnel detection and management
+  - Port history tracking with persistence
+  - Instance name caching system
+  - Interactive profile management
+  - Comprehensive error handling
+  - Real-time tunnel monitoring
+
+## Support
+
+For issues or feature requests, refer to the project repository or AWS SSM documentation for tunnel-related problems.
 
 ## License
-MIT License (or specify your own) 
+
+MIT License 
