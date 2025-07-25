@@ -10,6 +10,8 @@ Creates secure tunnels to your AWS EC2 instances using AWS SSM, then:
 - **Manages multiple tunnels**: Track, monitor, and control active connections
 - **Smart port selection**: Remembers your preferences and avoids conflicts
 
+If you ALREADY have AWS Profiles setup - just run ./ssmtunnel.ps1 - you can choose from there.
+
 ![Demo showing profile selection and tunnel creation]
 
 ## Quick Start
