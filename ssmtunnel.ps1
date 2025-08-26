@@ -4,14 +4,15 @@
 # License: MIT License
 
 param (
-    [string]$AWSProfile
+    [string]$AWSProfile,
+    [string]$AWSRegion = "us-east-1"
 )
 
 # Script version
 $ScriptVersion = "2.0"
 
-# Default AWS region for instance lookups (set to your preferred region)
-$DefaultAwsRegion = "us-east-1"
+# AWS region for instance lookups (can be overridden with -AWSRegion parameter)
+$DefaultAwsRegion = $AWSRegion
 
 # Display version information
 Write-Host "SSM Tunnel Script v$ScriptVersion" -ForegroundColor Cyan
@@ -234,6 +235,54 @@ function Show-UnavailablePorts {
     Write-Host "------------------------`n"
 }
 
+# --- AWS Region Functions ---
+function Get-AwsRegions {
+    # Common AWS regions - you can add more as needed
+    return @(
+        "us-east-1",
+        "us-east-2", 
+        "us-west-1",
+        "us-west-2",
+        "eu-west-1",
+        "eu-west-2",
+        "eu-west-3",
+        "eu-central-1",
+        "eu-north-1",
+        "ap-northeast-1",
+        "ap-northeast-2",
+        "ap-southeast-1",
+        "ap-southeast-2",
+        "ap-south-1",
+        "ca-central-1",
+        "sa-east-1"
+    )
+}
+
+function Show-RegionSelection {
+    $regions = Get-AwsRegions
+    Write-Host "`n--- Select AWS Region ---" -ForegroundColor Yellow
+    Write-Host "Current region: $DefaultAwsRegion" -ForegroundColor Cyan
+    Write-Host ""
+    
+    for ($i = 0; $i -lt $regions.Count; $i++) {
+        $currentMarker = if ($regions[$i] -eq $DefaultAwsRegion) { " (current)" } else { "" }
+        Write-Host ("  {0,2}. {1}{2}" -f ($i+1), $regions[$i], $currentMarker)
+    }
+    
+    Write-Host ""
+    $selection = Read-Host "Enter the number of the region to use, or press Enter to keep current"
+    
+    if ($selection -match "^\d+$") {
+        $selectedIndex = [int]$selection - 1
+        if ($selectedIndex -ge 0 -and $selectedIndex -lt $regions.Count) {
+            $script:DefaultAwsRegion = $regions[$selectedIndex]
+            Write-Host "Region changed to: $DefaultAwsRegion" -ForegroundColor Green
+        } else {
+            Write-Host "Invalid selection." -ForegroundColor Red
+        }
+    }
+}
+
 # --- AWS Profile Functions ---
 function Get-AwsProfiles {
     $configFile = "$env:USERPROFILE\.aws\config"
@@ -446,6 +495,10 @@ Load-InstanceNameCache
 
 if (-not $AWSProfile) {
     while ($true) {
+        Write-Host "`n--- Current Settings ---" -ForegroundColor Cyan
+        Write-Host "AWS Region: $DefaultAwsRegion" -ForegroundColor White
+        Write-Host ""
+        
         $availableProfiles = Show-ProfileList
         if ($availableProfiles.Count -eq 0) {
             Write-Host "No AWS profiles found in $env:USERPROFILE\.aws\config or the file does not exist."
@@ -456,11 +509,13 @@ if (-not $AWSProfile) {
         $newProfileOptionNumber = $availableProfiles.Count + 1
         $deleteProfileOptionNumber = $availableProfiles.Count + 2
         $renameProfileOptionNumber = $availableProfiles.Count + 3
-        $listSessionsOptionNumber = $availableProfiles.Count + 4
-        $refreshCacheOptionNumber = $availableProfiles.Count + 5
+        $changeRegionOptionNumber = $availableProfiles.Count + 4
+        $listSessionsOptionNumber = $availableProfiles.Count + 5
+        $refreshCacheOptionNumber = $availableProfiles.Count + 6
         Write-Host "  $newProfileOptionNumber. Configure a new SSO profile"
         Write-Host "  $deleteProfileOptionNumber. Delete a profile"
         Write-Host "  $renameProfileOptionNumber. Rename a profile"
+        Write-Host "  $changeRegionOptionNumber. Change AWS region"
         Write-Host "  $listSessionsOptionNumber. List active local SSM tunnels"
         Write-Host "  $refreshCacheOptionNumber. Refresh instance name cache from AWS"
         
@@ -501,6 +556,10 @@ if (-not $AWSProfile) {
                 } else {
                     Write-Host "Invalid profile number."
                 }
+                continue # Reload menu
+            } elseif ($selectedIndex -eq ($changeRegionOptionNumber - 1)) {
+                # Change region
+                Show-RegionSelection
                 continue # Reload menu
             } elseif ($selectedIndex -eq ($listSessionsOptionNumber - 1)) {
                 # List active local tunnels
@@ -618,8 +677,8 @@ if (-not (Get-Command "aws" -ErrorAction SilentlyContinue)) {
 }
 
 # Fetch instance details
-Write-Host "Fetching EC2 instance list for profile '$AWSProfile'..."
-$awsOutput = aws ec2 describe-instances --profile $AWSProfile --query "Reservations[*].Instances[*].[InstanceId,Tags[?Key=='Name']|[0].Value,State.Name,PlatformDetails,KeyName]" --output json 2>&1
+Write-Host "Fetching EC2 instance list for profile '$AWSProfile' in region '$DefaultAwsRegion'..."
+$awsOutput = aws ec2 describe-instances --profile $AWSProfile --region $DefaultAwsRegion --query "Reservations[*].Instances[*].[InstanceId,Tags[?Key=='Name']|[0].Value,State.Name,PlatformDetails,KeyName]" --output json 2>&1
 
 # Check for expired token or credential errors
 if ($awsOutput -match "ExpiredToken|The security token included in the request is expired|Unable to locate credentials|could not be found") {
@@ -747,7 +806,7 @@ $jsonParams = @{
     "portNumber" = @("$remotePort")
     "localPortNumber" = @("$localPort")
 } | ConvertTo-Json -Compress
-$command = "aws ssm start-session --target $($selectedInstance.InstanceId) --document-name AWS-StartPortForwardingSession --parameters '$jsonParams' --profile $AWSProfile"
+$command = "aws ssm start-session --target $($selectedInstance.InstanceId) --document-name AWS-StartPortForwardingSession --parameters '$jsonParams' --profile $AWSProfile --region $DefaultAwsRegion"
 
 Write-Host "`nCommand to start session (for reference):"
 Write-Host "$command"
