@@ -798,7 +798,14 @@ while ($true) {
 
 # Prompt for remote port selection
 $portSelection = Read-Host "Enter remote port to forward (22 for SSH, 3389 for RDP) [default is 3389]"
-$remotePort = if ($portSelection -eq "22") { 22 } else { 3389 }
+if ([string]::IsNullOrWhiteSpace($portSelection)) {
+    $remotePort = 3389
+} elseif ($portSelection -match '^\d+$' -and [int]$portSelection -ge 1 -and [int]$portSelection -le 65535) {
+    $remotePort = [int]$portSelection
+} else {
+    Write-Warning "Invalid remote port '$portSelection'; defaulting to 3389."
+    $remotePort = 3389
+}
 
 # Build and execute the AWS SSM command
 Write-Host "Starting port forwarding session to instance $($selectedInstance.InstanceId)..."
